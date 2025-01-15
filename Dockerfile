@@ -1,41 +1,48 @@
-FROM scratch
-COPY --from=qemux/qemu-docker:4.15 / /
+ARG VERSION_ARG="latest"
+FROM scratch AS build-amd64
+
+COPY --from=qemux/qemu-docker:6.13 / /
 
 ARG DEBCONF_NOWARNINGS="yes"
-ARG DEBIAN_FRONTEND "noninteractive"
-ARG DEBCONF_NONINTERACTIVE_SEEN "true"
+ARG DEBIAN_FRONTEND="noninteractive"
+ARG DEBCONF_NONINTERACTIVE_SEEN="true"
 
-RUN apt-get update \
-    && apt-get --no-install-recommends -y install \
+RUN set -eu && \
+    apt-get update && \
+    apt-get --no-install-recommends -y install \
+        bc \
+        jq \
         curl \
         7zip \
         wsdd \
         samba \
+        xz-utils \
         wimtools \
         dos2unix \
         cabextract \
         genisoimage \
         libxml2-utils \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+        libarchive-tools && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-COPY ./src /run/
-COPY ./assets /run/assets
+COPY --chmod=755 ./src /run/
+COPY --chmod=755 ./assets /run/assets
 
-ADD https://raw.githubusercontent.com/christgau/wsdd/master/src/wsdd.py /usr/sbin/wsdd
-ADD https://github.com/qemus/virtiso/releases/download/v0.1.248/virtio-win-0.1.248.iso /run/drivers.iso
+ADD --chmod=664 https://github.com/qemus/virtiso-whql/releases/download/v1.9.44-0/virtio-win-1.9.44.tar.xz /drivers.txz
 
-RUN chmod +x /run/*.sh && chmod +x /usr/sbin/wsdd
+FROM dockurr/windows-arm:${VERSION_ARG} AS build-arm64
+FROM build-${TARGETARCH}
 
-EXPOSE 8006 3389
-VOLUME /storage
-
-ENV RAM_SIZE "4G"
-ENV CPU_CORES "2"
-ENV DISK_SIZE "64G"
-ENV VERSION "win11"
-
-ARG VERSION_ARG "0.0"
+ARG VERSION_ARG="0.00"
 RUN echo "$VERSION_ARG" > /run/version
+
+VOLUME /storage
+EXPOSE 8006 3389
+
+ENV VERSION="11"
+ENV RAM_SIZE="4G"
+ENV CPU_CORES="2"
+ENV DISK_SIZE="64G"
 
 ENTRYPOINT ["/usr/bin/tini", "-s", "/run/entry.sh"]

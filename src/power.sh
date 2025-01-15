@@ -6,13 +6,14 @@ set -Eeuo pipefail
 QEMU_TERM=""
 QEMU_PORT=7100
 QEMU_TIMEOUT=110
-QEMU_PID="/run/shm/qemu.pid"
-QEMU_PTY="/run/shm/qemu.pty"
-QEMU_LOG="/run/shm/qemu.log"
-QEMU_OUT="/run/shm/qemu.out"
-QEMU_END="/run/shm/qemu.end"
+QEMU_DIR="/run/shm"
+QEMU_PID="$QEMU_DIR/qemu.pid"
+QEMU_PTY="$QEMU_DIR/qemu.pty"
+QEMU_LOG="$QEMU_DIR/qemu.log"
+QEMU_OUT="$QEMU_DIR/qemu.out"
+QEMU_END="$QEMU_DIR/qemu.end"
 
-rm -f /run/shm/qemu.*
+rm -f "$QEMU_DIR/qemu.*"
 touch "$QEMU_LOG"
 
 _trap() {
@@ -22,25 +23,50 @@ _trap() {
   done
 }
 
+boot() {
+
+  [ -f "$QEMU_END" ] && return 0
+
+  if [ -s "$QEMU_PTY" ]; then
+    if [ "$(stat -c%s "$QEMU_PTY")" -gt 7 ]; then
+      local fail=""
+      if [[ "${BOOT_MODE,,}" == "windows_legacy" ]]; then
+        grep -Fq "No bootable device." "$QEMU_PTY" && fail="y"
+        grep -Fq "BOOTMGR is missing" "$QEMU_PTY" && fail="y"
+      fi
+      if [ -z "$fail" ]; then
+        info "Windows started succesfully, visit http://localhost:8006/ to view the screen..."
+        return 0
+      fi
+    fi
+  fi
+
+  error "Timeout while waiting for QEMU to boot the machine!"
+
+  local pid
+  pid=$(<"$QEMU_PID")
+  { kill -15 "$pid" || true; } 2>/dev/null
+
+  return 0
+}
+
 ready() {
 
   [ -f "$STORAGE/windows.boot" ] && return 0
-  [ ! -f "$QEMU_PTY" ] && return 1
+  [ ! -s "$QEMU_PTY" ] && return 1
 
-  if [ -f "$STORAGE/windows.old" ]; then
+  if [[ "${BOOT_MODE,,}" == "windows_legacy" ]]; then
     local last
     local bios="Booting from Hard"
     last=$(grep "^Booting.*" "$QEMU_PTY" | tail -1)
-    if [[ "${last,,}" == "${bios,,}"* ]]; then
-      return 0
-    fi
-    return 1
-  fi
-
-  local line="Windows Boot Manager"
-  if grep -Fq "$line" "$QEMU_PTY"; then
+    [[ "${last,,}" != "${bios,,}"* ]] && return 1
+    grep -Fq "No bootable device." "$QEMU_PTY" && return 1
+    grep -Fq "BOOTMGR is missing" "$QEMU_PTY" && return 1
     return 0
   fi
+
+  local line="\"Windows Boot Manager\""
+  grep -Fq "$line" "$QEMU_PTY" && return 0
 
   return 1
 }
@@ -52,7 +78,7 @@ finish() {
 
   touch "$QEMU_END"
 
-  if [ -f "$QEMU_PID" ]; then
+  if [ -s "$QEMU_PID" ]; then
 
     pid=$(<"$QEMU_PID")
     error "Forcefully terminating Windows, reason: $reason..."
@@ -61,22 +87,26 @@ finish() {
     while isAlive "$pid"; do
       sleep 1
       # Workaround for zombie pid
-      [ ! -f "$QEMU_PID" ] && break
+      [ ! -s "$QEMU_PID" ] && break
     done
   fi
 
-  if [ ! -f "$STORAGE/windows.boot" ] && [ -f "$STORAGE/$BASE" ]; then
+  if [ ! -f "$STORAGE/windows.boot" ] && [ -f "$BOOT" ]; then
     # Remove CD-ROM ISO after install
     if ready; then
-      rm -f "$STORAGE/$BASE"
       touch "$STORAGE/windows.boot"
+      if [[ "$REMOVE" != [Nn]* ]]; then
+        rm -f "$BOOT" 2>/dev/null || true
+      fi
     fi
   fi
 
   pid="/var/run/tpm.pid"
-  [ -f "$pid" ] && pKill "$(<"$pid")"
+  [ -s "$pid" ] && pKill "$(<"$pid")"
 
-  fKill "wsdd"
+  pid="/var/run/wsdd.pid"
+  [ -s "$pid" ] && pKill "$(<"$pid")"
+
   fKill "smbd"
 
   closeNetwork
@@ -91,7 +121,7 @@ terminal() {
 
   local dev=""
 
-  if [ -f "$QEMU_OUT" ]; then
+  if [ -s "$QEMU_OUT" ]; then
 
     local msg
     msg=$(<"$QEMU_OUT")
@@ -139,7 +169,7 @@ _graceful_shutdown() {
   touch "$QEMU_END"
   info "Received $1, sending ACPI shutdown signal..."
 
-  if [ ! -f "$QEMU_PID" ]; then
+  if [ ! -s "$QEMU_PID" ]; then
     error "QEMU PID file does not exist?"
     finish "$code" && return "$code"
   fi
@@ -168,7 +198,7 @@ _graceful_shutdown() {
 
     ! isAlive "$pid" && break
     # Workaround for zombie pid
-    [ ! -f "$QEMU_PID" ] && break
+    [ ! -s "$QEMU_PID" ] && break
 
     info "Waiting for Windows to shutdown... ($cnt/$QEMU_TIMEOUT)"
 
@@ -186,7 +216,7 @@ _graceful_shutdown() {
 
 SERIAL="pty"
 MONITOR="telnet:localhost:$QEMU_PORT,server,nowait,nodelay"
-MONITOR="$MONITOR -daemonize -D $QEMU_LOG -pidfile $QEMU_PID"
+MONITOR+=" -daemonize -D $QEMU_LOG -pidfile $QEMU_PID"
 
 _trap _graceful_shutdown SIGTERM SIGHUP SIGINT SIGABRT SIGQUIT
 
